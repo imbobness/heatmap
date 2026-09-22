@@ -1,0 +1,543 @@
+USE [ManufacturingDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[Load3GTSPNDataToTable_Canary]    Script Date: 9/22/2026 10:39:42 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+/*****************************************************************************************************************
+ Called From Job: getSPNData
+
+ Author:	  Thure Hoeckelberg
+ Create Date: 2022/12/05
+ Description: Loads table tmpSPN3GTData --> SP: Shift3GTPredictNumbers --> 3GTShiftPredictNumbers.aspx 
+			  Reworte to pull through dynamic cursor vice hard coded tags.
+
+ SELECT *
+ FROM SPN3GTData_Canary
+
+ EXEC Load3GTSPNDataToTable_Canary
+*******************************************************************************************************************/
+CREATE PROCEDURE [dbo].[Load3GTSPNDataToTable_Canary]
+	
+AS
+BEGIN
+/*******************************************************************************************************************
+ SET NOCOUNT ON - added to prevent extra result sets from interfering with SELECT statements.
+ Declare variables and parameters 
+*******************************************************************************************************************/
+	SET NOCOUNT ON
+
+	DECLARE @str3GTSQL AS VARCHAR(MAX)
+	DECLARE @strLine AS VARCHAR(10)
+	DECLARE @strLineNum AS VARCHAR(2)
+	DECLARE @strLotNum AS VARCHAR(25)
+	DECLARE @TagName AS VARCHAR(MAX)
+	DECLARE @strPower AS VARCHAR(22) 
+	DECLARE @dteEndDate AS DATETIME
+	DECLARE @dteShiftStart AS DATETIME
+	DECLARE @intTmpTableCount INT
+	DECLARE @intLineLoopCount AS INT
+	DECLARE @intTagLoopCount AS INT
+	DECLARE @intShiftTarget AS INT
+	DECLARE @intActiveInd AS INT
+	DECLARE @fltHourlyValue AS FLOAT
+	DECLARE @fltCurrValue AS FLOAT
+	DECLARE @fltShiftMin AS FLOAT
+	DECLARE @fltShiftHour as FLOAT
+	DECLARE @fltMinRemain AS FLOAT
+	DECLARE @fltHourRemain AS FLOAT
+	DECLARE @fltLastHrCellYld AS FLOAT
+	DECLARE @fltCurrCellYld AS FLOAT
+	DECLARE @fltLineYieldConfig AS FLOAT
+	DECLARE @LineID AS VARCHAR(10)
+	DECLARE @strProdFam AS VARCHAR(30)
+	DECLARE @intProdID AS VARCHAR(5)
+	DECLARE @ColumnName AS VARCHAR(150)
+	DECLARE @InSQLName AS VARCHAR(50)
+
+	CREATE TABLE #tblSPN3GTCurrData (LineID INT, TagName VARCHAR (MAX), 
+									 ColumnName VARCHAR (25), TagValue FLOAT) 
+										 
+	CREATE TABLE #tblSPN3GTHourData (LineID INT, TagName VARCHAR (MAX), 
+									 ColumnName VARCHAR (25), TagValue FLOAT) 
+	
+	CREATE TABLE #tblSPN3GTData (LineID INT, Line VARCHAR(6), Active_IND INT, FA_LAST_HR_IN INT,  
+								 FA_CURR_HR_IN INT,FA_LAST_HR_OUT INT, FA_CURR_HR_OUT INT, 
+								 FA_LAST_HR_YIELD FLOAT, FA_CURR_HR_YIELD FLOAT, 
+								 DM_LAST_HR_IN INT, DM_CURR_HR_IN INT, DM_LAST_HR_OUT INT, 
+								 DM_CURR_HR_OUT INT, DM_LAST_HR_YIELD FLOAT, 
+								 DM_CURR_HR_YIELD FLOAT, HYD_LAST_HR_IN INT, 
+								 HYD_CURR_HR_IN INT, HYD_LAST_HR_OUT INT, HYD_CURR_HR_OUT INT, 
+								 ALI_YIELD_LAST_HR FLOAT, ALI_YIELD_CURR_HR FLOAT, 
+								 SHIFT_PREDICT INT, POST_LAST_HR_IN INT, POST_LAST_HR_OUT INT, 
+								 POST_CURR_HR_IN INT, POST_CURR_HR_OUT INT, LOT_NUMBER VARCHAR(13), 
+								 SPHERE_POWER VARCHAR(22), 
+								 LOT_COUNT_CURR_HR INT, LOADER_PREV_SHIFT INT, 
+								 ShiftTarget INT, PROD_ID INT )
+
+	CREATE TABLE #tblLotInfo (Lot_Number VARCHAR(30), SKU_Info VARCHAR(30), Prod_Family VARCHAR(150),
+							  Brand  VARCHAR(5), ProductID VARCHAR(50), LineID INT)	
+/*******************************************************************************************************************
+ Initialize variables and parameters
+
+*******************************************************************************************************************/
+	SET @dteEndDate = GETDATE()
+	SET @intLineLoopCount = 51
+	SET @intTagLoopCount = 1
+	SET @fltHourlyValue = 0.0
+	SET @dteShiftStart = (SELECT MAX(ShiftStart) 
+						  FROM ManufacturingDB.dbo.maint_ProductionSchedule 
+						  WHERE ShiftStart < @dteEndDate AND deptid = '2GT'
+						 )
+	SET @fltShiftMin= CASE WHEN DATEDIFF(mi, @dteShiftStart, @dteEndDate)=0 THEN .01
+					  ELSE DATEDIFF(mi, @dteShiftStart, @dteEndDate)
+					  END
+	SET @fltShiftHour = @fltShiftMin / 60
+	SET @fltMinRemain = 720.0 - @fltShiftMin
+	SET @fltHourRemain = @fltMinRemain / 60
+
+	--SET @dteEndDate= CONVERT(VARCHAR (16), @dteEndDate, 121)
+	
+/*******************************************************************************************************************
+  Load current data into #tblSPN3GTCurrData table
+
+ SELECT *
+ FROM SPN3GTData_Canary
+
+ EXEC Load3GTSPNDataToTable_Canary
+********************************************************************************************************************/
+	DECLARE db_3GTSPN_Curr_Cursor CURSOR FOR 
+
+		SELECT DISTINCT sp.LineID, sp.TagName, sp.Curr_Hour, sp.InSQLName
+		FROM maint_LineSPN_3GTCanaryTag sp
+		JOIN maint_Line ml ON ml.LineID=sp.LineID
+		WHERE ml.ActiveInd='Y' 
+		AND ml.ProductionInd='Y'
+		AND sp.ActiveInd='Y'
+		AND sp.DeptID = '3GT'
+
+	OPEN db_3GTSPN_Curr_Cursor   
+	FETCH NEXT FROM db_3GTSPN_Curr_Cursor INTO @LineID, @TagName, @ColumnName, @InSQLName
+
+	WHILE @@FETCH_STATUS = 0  
+ 									
+		BEGIN
+			SET @fltCurrValue=''
+
+				SET @fltCurrValue = dbo.getCurrentValue_3GT (@TagName, @dteEndDate)
+
+				INSERT INTO #tblSPN3GTCurrData (LineID, TagName, ColumnName, TagValue)
+				SELECT @LineID, @TagName, @ColumnName, @fltCurrValue	
+
+	FETCH NEXT FROM db_3GTSPN_Curr_Cursor INTO @LineID, @TagName, @ColumnName, @InSQLName
+	    END
+   	CLOSE db_3GTSPN_Curr_Cursor   
+	DEALLOCATE db_3GTSPN_Curr_Cursor  
+
+/*******************************************************************************************************************
+Load Last hour data into @#tblSPN3GTHourData table
+********************************************************************************************************************/
+	DECLARE db_3GTSPN_Hour_Cursor CURSOR FOR 
+		SELECT DISTINCT sp.LineID, sp.TagName, sp.Last_Hour, sp.InSQLName
+		FROM maint_LineSPN_3GTCanaryTag sp
+		JOIN maint_Line ml ON ml.LineID=sp.LineID
+		WHERE ml.ActiveInd='Y' 
+		AND ml.ProductionInd='Y'
+		AND sp.ActiveInd='Y'
+		AND sp.DeptID = '3GT'
+
+	OPEN db_3GTSPN_Hour_Cursor   
+	FETCH NEXT FROM db_3GTSPN_Hour_Cursor INTO @LineID, @TagName, @ColumnName, @InSQLName
+
+	WHILE @@FETCH_STATUS = 0  
+ 									
+		BEGIN
+			SET @fltHourlyValue=''
+
+				SET @fltHourlyValue = dbo.getHourlyValue_3GT (@TagName, @dteEndDate)
+
+				INSERT INTO #tblSPN3GTHourData (LineID, TagName, ColumnName, TagValue)
+				SELECT @LineID, @TagName, @ColumnName, @fltHourlyValue	
+
+	FETCH NEXT FROM db_3GTSPN_Hour_Cursor INTO @LineID, @TagName, @ColumnName, @InSQLName
+	    END
+   	CLOSE db_3GTSPN_Hour_Cursor   
+	DEALLOCATE db_3GTSPN_Hour_Cursor  		
+
+/*******************************************************************************************************************
+ Get initial data for #tblSPN3GTData table
+
+********************************************************************************************************************/
+	INSERT INTO #tblSPN3GTData (LineID, Line, Active_IND, FA_LAST_HR_IN, FA_CURR_HR_IN, FA_LAST_HR_OUT, 
+								FA_CURR_HR_OUT, FA_LAST_HR_YIELD, FA_CURR_HR_YIELD, DM_LAST_HR_IN, DM_CURR_HR_IN, 
+								DM_LAST_HR_OUT, DM_CURR_HR_OUT, DM_LAST_HR_YIELD, DM_CURR_HR_YIELD, HYD_LAST_HR_IN, 
+								HYD_CURR_HR_IN, HYD_LAST_HR_OUT, HYD_CURR_HR_OUT, ALI_YIELD_LAST_HR, ALI_YIELD_CURR_HR, 
+								SHIFT_PREDICT, POST_LAST_HR_IN, POST_LAST_HR_OUT, POST_CURR_HR_IN, POST_CURR_HR_OUT, 
+								LOT_NUMBER, SPHERE_POWER, LOT_COUNT_CURR_HR, LOADER_PREV_SHIFT, ShiftTarget, PROD_ID)
+
+	SELECT hd.LineID, ml.CribmasterLineID AS line, 1, hd.TagValue, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,  
+		   NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL,  NULL, 
+		   NULL
+	FROM #tblSPN3GTHourData hd
+	JOIN maint_line ml ON ml.LineID=hd.LineID
+	WHERE hd.ColumnName='FA_LAST_HR'
+	AND ProductionInd='Y'
+
+/*******************************************************************************************************************
+ Update #tblSPN3GTData table with all attributes
+
+ SELECT *
+ FROM SPN3GTData_Canary
+
+ EXEC Load3GTSPNDataToTable_Canary
+
+********************************************************************************************************************/
+	UPDATE #tblSPN3GTData
+	SET FA_CURR_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+								   FROM #tblSPN3GTCurrData
+								   WHERE ColumnName='FA_CURR_IN')t1
+							 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET FA_LAST_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+								   FROM #tblSPN3GTHourData
+								   WHERE ColumnName='FA_LAST_HR')t1
+							 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET FA_CURR_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+								   FROM #tblSPN3GTCurrData
+								   WHERE ColumnName='FA_CURR')t1
+							 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET FA_LAST_HR_YIELD= t1.YieldValue FROM (SELECT hd.LineID, 
+												   CASE WHEN ISNULL(hd1.TagValue,0) = 0 THEN 0
+														WHEN CAST(hd.TagValue *100 /hd1.TagValue AS DECIMAL (10,2))>100 THEN 100
+												     ELSE CAST(hd.TagValue *100 /hd1.TagValue AS DECIMAL (10,2))
+												   END AS YieldValue
+											FROM #tblSPN3GTHourData hd
+											JOIN #tblSPN3GTHourData hd1 ON hd.LineID=hd1.LineID
+											WHERE hd.ColumnName='FA_LAST_HR'
+											AND hd1.ColumnName='FA_LAST_HR_IN'
+										   )t1
+									   WHERE #tblSPN3GTData.LineID =t1.LineID
+									
+	UPDATE #tblSPN3GTData
+	SET FA_CURR_HR_YIELD= t1.YieldValue FROM (SELECT cd.LineID, 
+												CASE WHEN ISNULL(cd1.TagValue,0) = 0 THEN 0
+													WHEN CAST(cd.TagValue *100 /cd1.TagValue AS DECIMAL (10,2))>100 THEN 100
+												  ELSE CAST(cd.TagValue *100 /cd1.TagValue AS DECIMAL (10,2))
+												END AS YieldValue
+										 FROM #tblSPN3GTCurrData cd
+										 JOIN #tblSPN3GTCurrData cd1 ON cd.LineID=cd1.LineID
+										 WHERE cd.ColumnName='FA_CURR'
+										 AND cd1.ColumnName='FA_CURR_IN'
+										)t1
+									WHERE #tblSPN3GTData.LineID =t1.LineID
+	UPDATE #tblSPN3GTData
+	SET DM_LAST_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+									  FROM #tblSPN3GTHourData
+									  WHERE ColumnName='DM_LAST_HR')t1
+								WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET DM_CURR_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+								   FROM #tblSPN3GTCurrData
+								   WHERE ColumnName='DM_CURR_IN')t1
+							 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET DM_LAST_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+									  FROM #tblSPN3GTHourData
+									  WHERE ColumnName='DM_LAST_HR')t1
+								WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET DM_CURR_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+								   FROM #tblSPN3GTCurrData
+								   WHERE ColumnName='DM_CURR')t1
+							 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET DM_LAST_HR_YIELD= t1.YieldValue FROM (SELECT hd.LineID, 
+												   CASE WHEN ISNULL(hd1.TagValue,0) = 0 THEN 0
+														WHEN CAST(hd.TagValue *100 /hd1.TagValue AS DECIMAL (10,2))>100 THEN 100
+												     ELSE CAST(hd.TagValue *100 /hd1.TagValue AS DECIMAL (10,2))
+												   END AS YieldValue
+											FROM #tblSPN3GTHourData hd
+											JOIN #tblSPN3GTHourData hd1 ON hd.LineID=hd1.LineID
+											WHERE hd.ColumnName='DM_LAST_HR'
+											AND hd1.ColumnName='DM_LAST_HR_IN'
+										   )t1
+									   WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET DM_CURR_HR_YIELD= t1.YieldValue FROM (SELECT cd.LineID, 
+												CASE WHEN ISNULL(cd1.TagValue,0) = 0 THEN 0
+													 WHEN CAST(cd.TagValue *100 /cd1.TagValue AS DECIMAL (10,2))>100 THEN 100
+												  ELSE CAST(cd.TagValue AS DECIMAL (10,2))/cd1.TagValue
+												END AS YieldValue
+										 FROM #tblSPN3GTCurrData cd
+									 	 JOIN #tblSPN3GTCurrData cd1 ON cd.LineID=cd1.LineID
+										 WHERE cd.ColumnName='DM_CURR'
+										 AND cd1.ColumnName='DM_CURR_IN'
+										)t1
+									WHERE #tblSPN3GTData.LineID =t1.LineID
+	
+	UPDATE #tblSPN3GTData
+	SET HYD_LAST_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+										  FROM #tblSPN3GTHourData
+										  WHERE ColumnName='HYD_LAST_HR_IN')t1
+									WHERE #tblSPN3GTData.LineID =t1.LineID
+	UPDATE #tblSPN3GTData
+	SET HYD_CURR_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+									   FROM #tblSPN3GTCurrData
+									   WHERE ColumnName='HYD_CURR_IN')t1
+								 WHERE #tblSPN3GTData.LineID =t1.LineID		
+	UPDATE #tblSPN3GTData
+	SET HYD_LAST_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+										   FROM #tblSPN3GTHourData
+										   WHERE ColumnName='HYD_LAST_HR')t1
+									 WHERE #tblSPN3GTData.LineID =t1.LineID
+	UPDATE #tblSPN3GTData
+	SET HYD_CURR_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+										FROM #tblSPN3GTCurrData
+										WHERE ColumnName='HYD_CURR')t1
+								  WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET ALI_YIELD_LAST_HR= t1.YieldValue FROM (SELECT hd.LineID, 
+												   CASE WHEN ISNULL(hd1.TagValue,0) = 0 THEN 0
+														WHEN CAST(hd.TagValue *100 /hd1.TagValue AS DECIMAL (10,2))>100 THEN 100
+												     ELSE CAST(hd.TagValue *100 /hd1.TagValue AS DECIMAL (10,2))
+												   END AS YieldValue
+											FROM #tblSPN3GTHourData hd
+											JOIN #tblSPN3GTHourData hd1 ON hd.LineID=hd1.LineID
+											WHERE hd.ColumnName='ALI_YIELD_LAST_Out'
+											AND hd1.ColumnName='ALI_YIELD_LAST_In'
+										   )t1
+									   WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET ALI_YIELD_CURR_HR= t1.YieldValue FROM (SELECT cd.LineID, 
+												CASE WHEN ISNULL(cd1.TagValue,0) = 0 THEN 0
+													 WHEN CAST(cd.TagValue *100 /cd1.TagValue AS DECIMAL (10,2))>100 THEN 100
+												  ELSE CAST(cd.TagValue AS DECIMAL (10,2))/cd1.TagValue
+												END AS YieldValue
+										 FROM #tblSPN3GTCurrData cd
+									 	 JOIN #tblSPN3GTCurrData cd1 ON cd.LineID=cd1.LineID
+										 WHERE cd.ColumnName='ALI_YIELD_CURR_Out'
+										 AND cd1.ColumnName='ALI_YIELD_CURR_In'
+										)t1
+									WHERE #tblSPN3GTData.LineID =t1.LineID
+	
+
+	UPDATE #tblSPN3GTData
+	SET POST_LAST_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+									   FROM #tblSPN3GTHourData
+								  	   WHERE ColumnName='Loader_LAST_HR')t1
+								 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET POST_LAST_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+									FROM #tblSPN3GTHourData
+									WHERE ColumnName='ALI_YIELD_LAST_Out')t1
+							  WHERE #tblSPN3GTData.LineID =t1.LineID
+	
+	UPDATE #tblSPN3GTData
+	SET POST_LAST_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+									   FROM #tblSPN3GTHourData
+								  	   WHERE ColumnName='Loader_LAST_HR')t1
+								 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+
+	UPDATE #tblSPN3GTData
+	SET POST_CURR_HR_IN= t1.TagValue FROM (SELECT LineID, TagValue
+									   FROM #tblSPN3GTCurrData
+								  	   WHERE ColumnName='ALI_YIELD_CURR_Out')t1
+								 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET POST_CURR_HR_OUT= t1.TagValue FROM (SELECT LineID, TagValue
+									FROM #tblSPN3GTCurrData
+									WHERE ColumnName='Loader_CURR')t1
+							  WHERE #tblSPN3GTData.LineID =t1.LineID
+							  
+	
+
+	UPDATE #tblSPN3GTData
+	SET SHIFT_PREDICT= t1.TagValue FROM (SELECT cd.LineID, 
+											  CASE WHEN @fltShiftMin < .1 THEN cd.TagValue
+												ELSE (cd.TagValue + ((cd.TagValue/@fltShiftHour)* @fltHourRemain))
+											  END AS TagValue
+									   FROM #tblSPN3GTCurrData cd
+									   JOIN #tblSPN3GTHourData hd ON hd.LineID=cd.LineID
+									   WHERE cd.ColumnName='Loader_CURR'
+									   AND hd.ColumnName='Loader_LAST_HR')t1
+								 WHERE #tblSPN3GTData.LineID =t1.LineID
+
+								
+
+	UPDATE #tblSPN3GTData
+	SET LOADER_PREV_SHIFT= t1.LensPerShift FROM (SELECT ln.LineID, ln.LensPerShift
+												 FROM shift_LensNumber ln
+												 WHERE ln.ProductionDate = (SELECT DISTINCT ProductionDate
+																			FROM maint_ProductionSchedule
+																			WHERE ShiftEnd >= DATEADD(hh,-12,GETDATE())
+																			AND ShiftEnd <= GETDATE()
+																			AND DeptID='2GT') 
+												  AND ln.TeamID=(SELECT DISTINCT TeamID
+										 						 FROM maint_ProductionSchedule
+																 WHERE ShiftEnd >= DATEADD(hh,-12,GETDATE())
+																 AND ShiftEnd <= GETDATE()
+																 AND DeptID='2GT')
+												  AND ln.DeptID = '3GT'
+											 )t1
+									    WHERE #tblSPN3GTData.LineID =t1.LineID
+
+	UPDATE #tblSPN3GTData
+	SET LOT_COUNT_CURR_HR= t1.TagValue FROM (SELECT LineID, TagValue
+									FROM #tblSPN3GTCurrData
+									WHERE ColumnName='LOT_COUNT_CURR')t1
+							  WHERE #tblSPN3GTData.LineID =t1.LineID
+
+/*******************************************************************************************************************
+ Get Lot numbers
+********************************************************************************************************************/
+		
+SET @str3GTSQL = 'SELECT t2.containername, t2.spherepower, ' +
+								    ' CASE WHEN t2.prodfam LIKE ''1D MOIST MULTIFOCAL%'' THEN ''1DM Multifocal'' '+
+								        ' WHEN t2.prodfam LIKE ''1DM ASTIG%'' THEN ''1DM Astigmatism'' '+
+								        ' ELSE t2.prodfam '+
+								    ' END AS PROD_FAMILY, t2.Brand, mp.ProductID, ml.LineID  '+
+							' FROM OPENQUERY(MNFDB_P3GT, '' ' + 
+							' SELECT * FROM (SELECT ld.lot_no containername, ' +
+											        ' CASE WHEN pr.cylinder IS NOT NULL THEN TO_CHAR(pr.Base_Curve||'''' ''''||pr.sphere_power||'''' ''''||pr.cylinder||''''/''''||pr.axis) ' +
+													'      WHEN pr.add_power IS NOT NULL THEN TO_CHAR(pr.Base_Curve||'''' ''''||pr.sphere_power||'''' / ''''||pr.add_power) ' +
+													'    ELSE pr.Base_Curve||'''' ''''||pr.sphere_power ' +
+													' END spherepower, ' +
+											        ' pr.prod_desc prodfam, ' +
+											        ' pr.BRAND, ld.lsmachine_no ' +
+											' FROM OWNER_3GT.LOT_DATA ld ' +
+											' JOIN OWNER_3GT.S_PROD_ID_MASTER pr ON ld.product_id = pr.product_id ' +
+											' WHERE ld.lot_status = ''''IN-PROCESS'''' ' +
+											' AND ld.lc_datetime IS NULL ' +
+											' AND ld.capture_datetime = (SELECT MAX(x.capture_datetime) ' +
+											'                            FROM lot_data x ' +
+											'                            WHERE x.lsmachine_no = ld.lsmachine_no ' +
+											'							 AND x.lot_status = ''''IN-PROCESS'''' ' +
+											'							 AND x.lc_datetime IS NULL) ' +
+											' ) ' +
+							' '') t2 
+						JOIN ManufacturingDB.dbo.maint_Line ml on ml.ODSPLineName = t2.lsmachine_no 
+						LEFT JOIN ManufacturingDB.dbo.maint_Product mp on mp.Brand = t2.BRAND
+						WHERE ml.ProductionInd=''Y'' 
+						AND ml.DeptID =''3GT''
+					'
+
+	INSERT INTO #tblLotInfo (LOT_NUMBER, SKU_INFO, PROD_FAMILY, Brand, PRODUCTID, LineID)
+	EXEC(@str3GTSQL)
+
+/*******************************************************************************************************************
+Update tblSPN2GTData with lot data Z18_MES_LOT_NUMBER, Z18_LOT_POWER, Z18_PROD_ID
+		EXEC Load3GTSPNDataToTable
+*******************************************************************************************************************/
+	
+	UPDATE #tblSPN3GTData
+	SET LOT_NUMBER= t1.LOT_NUMBER,
+	    SPHERE_POWER=t1.SKU_INFO,
+		PROD_ID=t1.PRODUCTID		   FROM (SELECT LineID, LOT_NUMBER, SKU_INFO, PROD_FAMILY,
+														 PRODUCTID
+												 FROM #tblLotInfo
+												)t1
+								       WHERE #tblSPN3GTData.LineID=t1.LineID
+
+/*******************************************************************************************************************
+	Catch Errors teset and Increment the Tag Loop Count
+*******************************************************************************************************************/
+	
+/*******************************************************************************************************************
+	We first remove unwanted lines and update targets for all lines running engineering lots or in middle of master
+	lot change or that has productID of 24 to 100000 then we update the ShiftTargt columns for maximum recordId
+	for each line from maint_BusinessPlan.
+*******************************************************************************************************************/	
+ 
+UPDATE spd
+  SET  spd.ShiftTarget = 100000
+  FROM #tblSPN3GTData spd
+  WHERE spd.PROD_ID = 24
+
+UPDATE spd
+  SET spd.ShiftTarget = ISNULL(t1.BusinessPlan,0)
+  FROM #tblSPN3GTData spd
+  INNER JOIN 
+	(SELECT mbp.lineId, mbp.ProductID, mbp.BusinessPlan, mbp.recordID
+     FROM maint_BusinessPlan  mbp
+     JOIN #tblSPN3GTData spd ON spd.LineID=mbp.LineID
+     WHERE mbp.MaintProductionYearMonthRecordID = (SELECT RecordID 
+												   FROM maint_ProductionYearMonth mpy
+											       WHERE GETDATE() BETWEEN MonthStartDate AND MonthEndDate)
+     AND spd.PROD_ID=mbp.ProductID
+	) t1 ON spd.LineID = t1.LineId 
+		 AND spd.PROD_ID = t1.ProductID                
+
+
+/*******************************************************************************************************************
+	Check if temp table has data, if data present truncate SPN3GTData table and insert new data
+ SELECT *
+ FROM SPN3GTData_Canary
+
+ EXEC Load3GTSPNDataToTable_Canary
+*******************************************************************************************************************/	 
+DECLARE @Count AS INT
+SELECT @Count = count (*) FROM #tblSPN3GTData
+
+IF @Count > 0 
+BEGIN
+                 
+TRUNCATE TABLE SPN3GTData_Canary
+
+INSERT INTO SPN3GTData_Canary (SortOrder, ShiftStartDate, ShiftEndDate, Date, MinElapsed, HrElapsed, MinRemain, 
+							  HrRemain, Line, FA_LastHr, FA_LastHrYld, DM_LastHr, DM_LastHrYld, HYD_LastHrBypass, 
+							  ALI_LastHourYield, ShiftPredict, Loader_PreviousShift, Post_OutCurr, Loader_AveHrlyRate, 
+							  Post_OutLastHour, Loader_LotNumber, Loader_Power, Loader_RackCount, ShiftTarget, Prod_ID)
+SELECT LineID 							AS SortOrder,
+	   @dteShiftStart					AS ShiftStartDate,
+	   DATEADD(hh, 12, @dteShiftStart)  AS ShiftEndDate,
+	   @dteEndDate						AS Date,
+	   @fltShiftMin						AS MinElapsed,
+	   @fltShiftHour					AS HrElapsed,
+	   @fltMinRemain					AS MinRemain,
+	   @fltHourRemain					AS HrRemain,
+	   line								AS Line,
+	   FA_LAST_HR_OUT					AS FA_LastHr,
+	   FA_LAST_HR_YIELD					AS FA_LastHrYld,
+	   DM_LAST_HR_OUT					AS DM_LastHr,
+	   DM_LAST_HR_YIELD					AS DM_LastHrYld,
+	   DM_LAST_HR_OUT-HYD_LAST_HR_IN	AS HYD_LastHrBypass,
+	   ISNULL(ALI_YIELD_LAST_HR, 0.0)	AS ALI_LastHourYield,
+	   SHIFT_PREDICT					AS ShiftPredict,
+	   LOADER_PREV_SHIFT				AS Loader_PreviousShift,
+	   POST_CURR_HR_OUT					AS Post_OutCurr,
+	   POST_CURR_HR_OUT/@fltShiftHour AS Loader_AveHrlyRate,
+	   POST_LAST_HR_OUT					AS Post_OutLastHour,
+	   ISNULL(LOT_NUMBER,24)			AS Loader_LotNumber,
+	   SPHERE_POWER						AS Loader_Power,
+	   LOT_COUNT_CURR_HR				AS Loader_RackCount,
+	   ISNULL(shifttarget,100000)		AS ShiftTarget,
+	   ISNULL(PROD_ID,24)				AS Prod_ID
+	FROM #tblSPN3GTData
+
+
+  END
+
+END 
+GO
+
+
