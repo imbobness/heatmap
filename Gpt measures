@@ -1,0 +1,194 @@
+The PBIX is structurally healthy, but it is not yet ready to produce the Python version of your original heatmap without adding several fields and visuals.
+
+What I confirmed from the uploaded PBIX:
+
+* It opens as a valid Power BI package.
+* It was created with Power BI’s June 2026 model format.
+* It contains one report page: `Operations Heatmap`.
+* It currently contains only three visuals:
+
+  * Plant Output — Last 60 Minutes
+  * Historian Latest Sample
+  * Current Zone Output — Rolling 60 Minutes
+* Its model contains:
+
+  * `FactLive`
+  * `FactRecent`
+  * `FactDowntime`
+  * `FactShiftHistory`
+  * `DimLine`
+  * `DimZone`
+  * `DimTag`
+  * `DimTarget`
+  * `Query1`
+
+The current matrix only passes these fields:
+
+```text
+Rows:    DimLine[Line]
+Columns: DimZone[Zone]
+Values:  [Rolling 60-Minute Production]
+```
+
+That is enough for the blue matrix you currently have, but not enough for the richer hourly Python heatmap.
+
+## What is missing
+
+The Python visual needs a prepared dataset resembling:
+
+| Required field | Likely source                              |
+| -------------- | ------------------------------------------ |
+| Line           | `DimLine[Line]`                            |
+| Zone           | `DimZone[Zone]`                            |
+| ZoneSort       | Add to `DimZone`                           |
+| Period         | Derive from `FactRecent` timestamp         |
+| PeriodSort     | Derive from `FactRecent` timestamp         |
+| Actual         | Sum of `FactRecent[Increment]`             |
+| Target         | `DimTarget`                                |
+| Attainment     | DAX measure                                |
+| MinutesAtZero  | DAX or SQL calculation                     |
+| IsStale        | Compare last sample time with current time |
+| IsCurrentHour  | Calculated field or measure                |
+| StatusColor    | DAX measure                                |
+
+The most important missing part is the period axis. Your current page only shows a rolling 60-minute total per line and zone. The original heatmap shows multiple hourly periods, so Python needs one row for every:
+
+```text
+Line × Zone × Hour
+```
+
+## Recommended model additions
+
+Create these calculated columns or equivalent Power Query columns in `FactRecent`.
+
+```DAX
+Period Start =
+DATETIME(
+    YEAR(FactRecent[DateTime]),
+    MONTH(FactRecent[DateTime]),
+    DAY(FactRecent[DateTime]),
+    HOUR(FactRecent[DateTime]),
+    0,
+    0
+)
+```
+
+```DAX
+Period Label =
+VAR StartTime = FactRecent[Period Start]
+RETURN
+    FORMAT(StartTime, "h:mm AM/PM")
+        & "–"
+        & FORMAT(StartTime + TIME(1, 0, 0), "h:mm AM/PM")
+```
+
+```DAX
+Period Sort =
+VALUE(FORMAT(FactRecent[Period Start], "yyyymmddhh"))
+```
+
+Then mark:
+
+```text
+Period Label → Sort by column → Period Sort
+```
+
+Add a numerical order to `DimZone`, such as:
+
+```text
+Z1_IN   = 10
+Z1_OUT  = 20
+Z2A_IN  = 30
+Z2A_OUT = 40
+Z3_IN   = 50
+...
+Z6_OUT  = 120
+```
+
+## Measures needed
+
+The exact table/column names may differ, but conceptually:
+
+```DAX
+Hourly Production =
+SUM(FactRecent[Increment])
+```
+
+```DAX
+Hourly Target =
+MAX(DimTarget[HourlyTarget])
+```
+
+```DAX
+Hourly Attainment =
+DIVIDE(
+    [Hourly Production],
+    [Hourly Target]
+)
+```
+
+```DAX
+Heatmap Status =
+VAR Production = [Hourly Production]
+VAR Attainment = [Hourly Attainment]
+VAR ZeroMinutes = [Consecutive Zero Minutes]
+VAR IsStale = [Historian Is Stale]
+RETURN
+    SWITCH(
+        TRUE(),
+        IsStale = 1, "STALE",
+        ZeroMinutes >= 15, "STOPPED",
+        ISBLANK(Production), "NO DATA",
+        Attainment >= 0.98, "GREEN",
+        Attainment >= 0.90, "YELLOW",
+        "RED"
+    )
+```
+
+The 15-minute stoppage should ideally come from SQL or Power Query rather than complicated DAX. For every minute-level record:
+
+```text
+Increment > 0 → running
+Increment = 0 → potentially stopped
+15 consecutive zero minutes → active zone alert
+```
+
+## Fields to place in the Python visual
+
+After creating a Python visual, drag these fields into its Values well:
+
+```text
+DimLine[Line]
+DimZone[Zone]
+DimZone[ZoneSort]
+FactRecent[Period Label]
+FactRecent[Period Sort]
+[Hourly Production]
+[Hourly Target]
+[Hourly Attainment]
+[Consecutive Zero Minutes]
+[Historian Is Stale]
+[Heatmap Status]
+```
+
+Do not feed all raw historian samples into the Python visual. Aggregate them into line/zone/hour rows first. That will make rendering considerably faster and avoid Python’s 150,000-row visual limit.
+
+## Relationships to verify
+
+The model should have active one-to-many relationships similar to:
+
+```text
+DimLine[LineKey]  1 → * FactRecent[LineKey]
+DimZone[ZoneKey]  1 → * FactRecent[ZoneKey]
+DimTag[TagName]   1 → * FactRecent[TagName]
+DimLine           1 → * DimTarget or target bridge
+DimZone           1 → * DimTarget or target bridge
+```
+
+The earlier relationship corruption error you encountered makes this important. There should be only one active filtering path from `DimLine` and `DimZone` to `FactRecent`.
+
+## Bottom line
+
+The PBIX is a usable foundation, but it currently represents only the first all-lines rolling-output page. It does not yet contain the hourly structure, target comparison, 15-minute zero logic, stale-data handling, or Python visual needed to reproduce the original heatmap.
+
+The good news is that its table layout already points in the correct direction: `FactRecent`, `DimLine`, `DimZone`, `DimTarget`, and `FactDowntime` are the tables we would expect to use. The existing SQL and DAX do not need to be discarded; the report needs an hourly aggregation layer and a new Python-rendered page.
